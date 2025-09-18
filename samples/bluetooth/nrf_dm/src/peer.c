@@ -21,7 +21,7 @@
 #define PEER_TIMEOUT_STEP_MS    500
 #define PEER_TIMEOUT_INIT_MS    10000
 
-#define DISTANCE_MAX_LED        50   /* from 0 to DISTANCE_MAX_LED [decimeter] -
+#define DISTANCE_MAX_LED        10   /* from 0 to DISTANCE_MAX_LED [decimeter] -
 				      * the distance range which is indicated by the PWM LED
 				      */
 #define DEFAULT_RANGING_MODE    DM_RANGING_MODE_MCPD
@@ -191,14 +191,20 @@ static void print_result(struct dm_result *result)
 			(double)result->dist_estimates.mcpd.phase_slope,
 			(double)result->dist_estimates.mcpd.rssi_openspace,
 			(double)result->dist_estimates.mcpd.best);
+			struct message_data msg = { .distance = (double)result->dist_estimates.mcpd.high_precision};
 #else
 		printk("mcpd: ifft=%.2f phase_slope=%.2f rssi_openspace=%.2f best=%.2f\n",
 			(double)result->dist_estimates.mcpd.ifft,
 			(double)result->dist_estimates.mcpd.phase_slope,
 			(double)result->dist_estimates.mcpd.rssi_openspace,
 			(double)result->dist_estimates.mcpd.best);
+			struct message_data msg = { .distance = (double)result->dist_estimates.mcpd.best};
 #endif
 	}
+
+	struct message_data msg = { .address = addr,  .distance = (double)result->dist_estimates.mcpd.high_precision};
+
+	k_msgq_put(&peer_msgq, &msg, K_FOREVER);
 }
 
 static void timeout_handler(struct k_timer *timer_id)
@@ -223,15 +229,17 @@ static void timeout_handler(struct k_timer *timer_id)
 static void peer_thread(void)
 {
 	struct dm_result result;
-
+	bt_addr_le_t addr;
 	while (1) {
 		if (k_msgq_get(&result_msgq, &result, K_FOREVER) == 0) {
 			struct peer_entry *peer;
 
 			peer = peer_find(&result.bt_addr);
 			if (!peer) {
+				struct message_data msg = { .address = 0, .distance = 0};
+				k_msgq_put(&peer_msgq, &msg, K_FOREVER);
 				continue;
-			}
+			} else{
 
 			memcpy(&peer->result, &result, sizeof(peer->result));
 			peer->timeout_ms = PEER_TIMEOUT_INIT_MS;
@@ -241,6 +249,7 @@ static void peer_thread(void)
 
 			led_notification(closest_peer);
 			ble_notification(peer);
+			}
 		}
 	}
 }

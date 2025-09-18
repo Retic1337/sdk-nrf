@@ -16,9 +16,9 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <bluetooth/scan.h>
 #include <bluetooth/services/ddfs.h>
-
+#include <nrfx_pwm.h>
 #include <dk_buttons_and_leds.h>
-
+#include <zephyr/drivers/gpio.h>
 #include <dm.h>
 #include "peer.h"
 #include "service.h"
@@ -26,8 +26,8 @@
 #define DEVICE_NAME             CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN         (sizeof(DEVICE_NAME) - 1)
 
-#define RUN_STATUS_LED          DK_LED2
-#define CON_STATUS_LED          DK_LED3
+#define RUN_STATUS_LED          DK_LED3
+#define CON_STATUS_LED          DK_LED2
 #define RUN_LED_BLINK_INTERVAL  1000
 
 #define SUPPORT_DM_CODE         0xFF55AA5A
@@ -38,20 +38,24 @@ struct adv_mfg_data {
 	uint32_t rng_seed;          /* Random seed used for generating hopping patterns. */
 } __packed;
 
+#define SLOW_ADV_INTERVAL_MIN   1600  // 800 * 0.625 ms = 500 ms
+#define SLOW_ADV_INTERVAL_MAX   1600  // 801 * 0.625 ms = 500.625 ms
+#define LED1_NODE DT_ALIAS(led1)
+static const struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET(LED1_NODE, gpios);
 static struct adv_mfg_data mfg_data;
 struct bt_le_adv_param adv_param_conn =
 	BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_CONN |
 			     BT_LE_ADV_OPT_NOTIFY_SCAN_REQ,
-			     BT_GAP_ADV_FAST_INT_MIN_2,
-			     BT_GAP_ADV_FAST_INT_MAX_2,
+			     SLOW_ADV_INTERVAL_MIN,
+			     SLOW_ADV_INTERVAL_MAX,
 			     NULL);
 
 struct bt_le_adv_param adv_param_noconn =
 	BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_USE_IDENTITY |
 			     BT_LE_ADV_OPT_SCANNABLE |
 			     BT_LE_ADV_OPT_NOTIFY_SCAN_REQ,
-			     BT_GAP_ADV_FAST_INT_MIN_2,
-			     BT_GAP_ADV_FAST_INT_MAX_2,
+			     SLOW_ADV_INTERVAL_MIN,
+			     SLOW_ADV_INTERVAL_MAX,
 			     NULL);
 
 
@@ -94,6 +98,18 @@ static struct bt_scan_manufacturer_data scan_mfg_data = {
 	.data = (unsigned char *)&mfg_data,
 	.data_len = sizeof(mfg_data.company_code) + sizeof(mfg_data.support_dm_code),
 };
+
+
+#include <zephyr/drivers/lora.h>
+#define DEFAULT_RADIO_NODE DT_ALIAS(lora0)
+BUILD_ASSERT(DT_NODE_HAS_STATUS_OKAY(DEFAULT_RADIO_NODE),
+	     "No default LoRa radio specified in DT");
+
+#define MAX_DATA_LEN 10
+
+char data[MAX_DATA_LEN] = {'h', 'e', 'l', 'l', 'o', 'w', 'o', 'r', 'l', 'd'};
+const struct device *const lora_dev = DEVICE_DT_GET(DEFAULT_RADIO_NODE);
+
 
 static bool data_cb(struct bt_data *data, void *user_data)
 {
@@ -159,6 +175,7 @@ static void scan_filter_match(struct bt_scan_device_info *device_info,
 	bt_addr_le_copy(&addr, device_info->recv_info->addr);
 	peer_supported_add(device_info->recv_info->addr);
 	bt_data_parse(device_info->adv_data, data_cb, &addr);
+
 }
 
 BT_SCAN_CB_INIT(scan_cb, scan_filter_match, NULL, NULL, NULL);
@@ -332,7 +349,12 @@ static int bt_sync_init(void)
 
 	return err;
 }
-
+struct peer_data {
+    int peers;
+	double distance;
+};
+#define MSG_COUNT 10
+K_MSGQ_DEFINE(peer_msgq, sizeof(struct peer_data), MSG_COUNT, 4);
 static void data_ready(struct dm_result *result)
 {
 	if (result->status) {
@@ -349,7 +371,7 @@ int main(void)
 	int err;
 	uint32_t blink_status = 0;
 	struct dm_init_param init_param;
-
+	bt_addr_le_t addr;
 	printk("Starting Distance Measurement sample\n");
 
 	err = dk_leds_init();
@@ -390,9 +412,60 @@ int main(void)
 		return 0;
 	}
 
-	for (;;) {
-		dk_set_led(RUN_STATUS_LED, (++blink_status) % 2);
-		k_sleep(K_MSEC(RUN_LED_BLINK_INTERVAL));
-		service_azimuth_elevation_simulation();
+int ret;
+struct lora_modem_config config;
+	
+	if (!device_is_ready(lora_dev)) {
+		printk("%s Device not ready", lora_dev->name);
+		return 0;
+	}
+	config.frequency = 915000000;
+	config.bandwidth = BW_125_KHZ;
+	config.datarate = SF_10;
+	config.preamble_len = 8;
+	config.coding_rate = CR_4_5;
+	config.iq_inverted = false;
+	config.public_network = true;
+	config.tx_power = 22;
+	config.tx = true;
+	ret = lora_config(lora_dev, &config);
+	if (ret < 0) {
+		printk("LoRa config failed");
+		return 0;
+	}
+	printk("Setup Finished\n");
+	struct peer_data received_msg;
+	int last_peer = 0;
+	while (1) {
+		if (k_msgq_get(&peer_msgq, &received_msg, K_FOREVER) == 0) {
+			printk("Last Peer = %d\n",last_peer);
+			printk("received_msg.peer = %d\n",received_msg.peers);
+			if (last_peer != received_msg.peers) {
+				gpio_pin_toggle_dt(&led1);
+				printk("Main loop received value: %s\n", received_msg.peers);
+				printk("Distance %.2f\n", received_msg.distance);
+				//err = lora_send_async(lora_dev, data, MAX_DATA_LEN ,NULL);
+				//if (err) {
+				//	printk("Lora Transmission Failed (err %d)\n", err);
+				//}
+				gpio_pin_toggle_dt(&led1);
+				last_peer = received_msg.peers;
+				k_sleep(K_MSEC(1000));
+			}
+			else if (received_msg.peers == last_peer){
+			printk("received_msg.peers == last_peer\n");
+			printk("Distance %.2f\n", received_msg.distance);
+			last_peer = received_msg.peers;
+			}
+			else {
+			printk("New Peer\n");
+			printk("Distance %.2f\n", received_msg.distance);
+			last_peer = 1;
+			}
+
+		} 
+		k_sleep(K_MSEC(50));
+		printk("nothing\n");
+		
 	}
 }

@@ -14,6 +14,12 @@ extern "C" {
 #include <zephyr/kernel.h>
 #include <zephyr/bluetooth/addr.h>
 #include <dm.h>
+extern struct k_msgq peer_msgq;
+struct message_data {
+    int address;
+    double distance;
+};
+
 
 /** @brief Testing if the peer is supported.
  *
@@ -71,7 +77,6 @@ int peer_init(void);
  *  @param result Measurement structure.
  */
 void peer_update(struct dm_result *result);
-
 
 #ifdef __cplusplus
 }
